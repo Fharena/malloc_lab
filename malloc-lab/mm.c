@@ -72,12 +72,35 @@ team_t team = {
 //주어진 블록 포인터 bp에서 다음과 이전 블록 주소 계산
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) //footer에서 사이즈 얻음
+//explicit 매크로
+#define PREV_FREE(bp) (*(void**)(bp))
+#define NEXT_FREE(bp) (*(void**)(bp + DSIZE))
 
 //init이랑 find에서 둘다 쓸거고 main은 make로 만드니까 static으로 선언
 static char* heap_listp;
+//root
+static void* root;
+
+//next fit findptr
+static void* findptr;
+
 /*
  * mm_init - initialize the malloc package.
  */
+// free list에서 bp를 제거
+static void remove_from_free_list(void *bp) {
+    if (PREV_FREE(bp)) {
+        NEXT_FREE(PREV_FREE(bp)) = NEXT_FREE(bp);
+    } else {
+        root = NEXT_FREE(bp);
+    }
+    if (NEXT_FREE(bp)) {
+        PREV_FREE(NEXT_FREE(bp)) = PREV_FREE(bp);
+    }
+}
+
+// place(), free(), coalesce()에서 필요할 때 호출
+
 //coalesce 함수
 static void *coalesce(void *bp){
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
@@ -89,11 +112,14 @@ static void *coalesce(void *bp){
     }
     else if (prev_alloc && !next_alloc){//case2: next만 가용일때
         size += GET_SIZE(HDRP(NEXT_BLKP(bp))); //  다음블록 사이즈를 현재사이즈에 +
+        remove_from_free_list(NEXT_BLKP(bp));//다음블록 리스트에서 제거.
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
+        
     }
     else if (!prev_alloc && next_alloc){//case3: prev 블록만 가용일때
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        remove_from_free_list(PREV_BLKP(bp));//이전블록 리스트에서 제거.
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
         bp = PREV_BLKP(bp);
@@ -101,6 +127,8 @@ static void *coalesce(void *bp){
 
     else{//case4: 앞뒤로 가용 블록일때
         size += GET_SIZE(HDRP(PREV_BLKP(bp)))+GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        remove_from_free_list(NEXT_BLKP(bp));//다음블록 리스트에서 제거.
+        remove_from_free_list(PREV_BLKP(bp));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp= PREV_BLKP(bp);
@@ -123,20 +151,49 @@ static void *extend_heap(size_t words){
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); // new epilogue header
 
     //빈 공간 있으면 결합
-    return coalesce(bp);
+    bp = coalesce(bp);
+
+    //새로 만들어진 free 블록을 free list에 추가
+    NEXT_FREE(bp) = root;
+    PREV_FREE(bp) = NULL;
+    if (root != NULL)
+        PREV_FREE(root) = bp;
+    root = bp;
+
+    return bp;
 }
 int mm_init(void)
 {
+    //implicit 구현부
+    // if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
+    //     return -1;
+    // PUT(heap_listp, 0); /* Alignment padding */
+    // PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1)); /* Prologue header */
+    // PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
+    // PUT(heap_listp + (3*WSIZE), PACK(0, 1)); /* Epilogue header */
+    // heap_listp += (2*WSIZE);
+
+    // if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
+    //     return -1;
+    // return 0;
+
+    //explicit 구현부
+
     if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
-        return -1;
+    return -1;
     PUT(heap_listp, 0); /* Alignment padding */
     PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1)); /* Prologue header */
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
     PUT(heap_listp + (3*WSIZE), PACK(0, 1)); /* Epilogue header */
     heap_listp += (2*WSIZE);
 
-    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
+    void *bp = extend_heap(CHUNKSIZE/WSIZE);
+    if (bp == NULL)
         return -1;
+    root = bp; //첫 노드 payload 위치에 root 설정
+    findptr = root;
+    NEXT_FREE(root)=NULL;
+    PREV_FREE(root)=NULL;
     return 0;
 }
 
@@ -147,10 +204,30 @@ int mm_init(void)
 
 static void *find_fit(size_t asize){
     //first fit
-    void *bp;
+    // void *bp;
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp))>0;bp = NEXT_BLKP(bp)){
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+    // for (bp = root; bp != NULL;bp = NEXT_FREE(bp)){
+    //     // printf("loop");
+    //     if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
+    //         return bp;
+    //     }
+    // }
+    //next fit
+
+    void *bp = findptr;
+    
+    // 먼저 findptr부터 끝까지
+    for (; bp != NULL; bp = NEXT_FREE(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+            findptr = NEXT_FREE(bp); // 다음부터 시작하게 업데이트
+            return bp;
+        }
+    }
+
+    // 못 찾으면 root부터 findptr 직전까지 다시 탐색
+    for (bp = root; bp != findptr; bp = NEXT_FREE(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+            findptr = NEXT_FREE(bp);
             return bp;
         }
     }
@@ -158,20 +235,29 @@ static void *find_fit(size_t asize){
 }
 static void place(void *bp, size_t asize){
     size_t csize =  GET_SIZE(HDRP(bp));
+    remove_from_free_list(bp);
 
-    if((csize - asize) >= (2*DSIZE)){ //남는공간이 최소공간인 더블사이즈*2보다 크면
+    if((csize - asize) >= (3*DSIZE)){ //남는공간이 최소공간인 더블사이즈*2보다 크면 -> 리눅스 64비트로 컴파일 한다고 함.
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         bp=NEXT_BLKP(bp); //asize만큼 감
         PUT(HDRP(bp), PACK(csize - asize, 0));
         PUT(FTRP(bp), PACK(csize - asize, 0));
+        NEXT_FREE(bp) = root;// 현재 노드를 루트로 만들기
+        PREV_FREE(bp) = NULL;
+        if (root != NULL) {
+            PREV_FREE(root) = bp;
+        }
+        root = bp; //현재 split 된 노드가 루트가 됨
 
     }
     else{//최소공간 안나오면 다씀.
+        
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
     }
 }
+
 void *mm_malloc(size_t size)
 {
     // int newsize = ALIGN(size + SIZE_T_SIZE);
@@ -221,7 +307,13 @@ void mm_free(void *bp)
 
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
-    coalesce(bp);
+    void * coalbp = coalesce(bp);
+    NEXT_FREE(coalbp) = root;// coalesce한 노드를 루트로 만들기
+    PREV_FREE(coalbp) = NULL;
+    if (root != NULL) {
+        PREV_FREE(root) = coalbp;
+    }
+    root = coalbp; //현재 coalesce한 노드가 루트가 됨
 
 }
 
@@ -259,7 +351,9 @@ void *mm_realloc(void *ptr, size_t size)
     newptr = mm_malloc(size);
     if (newptr == NULL)
         return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    copySize = GET_SIZE(HDRP(oldptr)) - DSIZE;
+
     if (size < copySize)
         copySize = size;
     memcpy(newptr, oldptr, copySize);
